@@ -40,11 +40,6 @@ export default class PythonRunner {
     })
   }
 
-  removeListeners() {
-    this.handlerProcess.stdout.removeAllListeners();
-    this.handlerProcess.stderr.removeAllListeners();
-  }
-
   // no-op
   // () => void
   cleanup() {}
@@ -101,8 +96,9 @@ export default class PythonRunner {
         ].join('')
       }
 
-      this.handlerProcess.stdout.on('data', data => {
-        this.removeListeners()
+      const onData = (data) => {
+        this.handlerProcess.stdout.removeEventListener('data', onData)
+        this.handlerProcess.stderr.removeEventListener('data', onErr)
 
         try {
           return accept(this._parsePayload(data.toString()))
@@ -113,12 +109,18 @@ export default class PythonRunner {
           // TODO return or re-throw?
           return reject(err)
         }
-      })
+      }
 
-      this.handlerProcess.stderr.on('data', data => {
+      const onErr = (data) => {
+        this.handlerProcess.stdout.removeEventListener('data', onData)
+        this.handlerProcess.stderr.removeEventListener('data', onErr)
+
         // TODO
         console.log(data.toString())
-      })
+      }
+
+      this.handlerProcess.stdout.on('data', onData)
+      this.handlerProcess.stderr.on('data', onErr)
 
       process.nextTick(() => {
         this.handlerProcess.stdin.write(input);
