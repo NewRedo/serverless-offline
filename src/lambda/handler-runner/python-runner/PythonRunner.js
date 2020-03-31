@@ -1,10 +1,20 @@
 import { EOL, platform } from 'os'
 import { delimiter, join, relative, resolve } from 'path'
-import execa from 'execa'
+import { spawn } from 'child_process'
+import extend from 'extend'
 
 const { parse, stringify } = JSON
 const { cwd } = process
 const { has } = Reflect
+
+const handlerProcesses = {};
+
+process.on('exit', () => {
+  Object.keys(handlerProcesses).forEach(key => {
+    const subprocess = handlerProcesses[key]
+    subprocess.kill()
+  })
+})
 
 export default class PythonRunner {
   #env = null
@@ -60,65 +70,66 @@ export default class PythonRunner {
   // invoke.py, copy/pasted entirely as is:
   // https://github.com/serverless/serverless/blob/v1.50.0/lib/plugins/aws/invokeLocal/invoke.py
   async run(event, context) {
-    const runtime = platform() === 'win32' ? 'python.exe' : this.#runtime
+    return new Promise((accept, reject) => {
+      const runtime = platform() === 'win32' ? 'python.exe' : this.#runtime
 
-    const input = stringify({
-      context,
-      event,
+      const input = stringify({
+        context,
+        event,
+      })
+
+      if (process.env.VIRTUAL_ENV) {
+        const runtimeDir = platform() === 'win32' ? 'Scripts' : 'bin'
+        process.env.PATH = [
+          join(process.env.VIRTUAL_ENV, runtimeDir),
+          delimiter,
+          process.env.PATH,
+        ].join('')
+      }
+
+      const fullPath = `${this.#handlerPath}.${this.#handlerName}`
+
+      if (!handlerProcesses[fullPath]) {
+        const [pythonExecutable] = runtime.split('.')
+
+        handlerProcesses[fullPath] = spawn(
+          pythonExecutable,
+          [
+            '-u',
+            resolve(__dirname, 'invoke.py'),
+            relative(cwd(), this.#handlerPath),
+            this.#handlerName,
+          ],
+          {
+            env: extend(process.env, this.#env),
+            shell: true
+          },
+        )
+      }
+
+      const python = handlerProcesses[fullPath];
+
+      python.stdout.on('data', data => {
+        try {
+          return accept(this._parsePayload(data.toString()))
+        } catch (err) {
+          // TODO
+          console.log('No JSON')
+
+          // TODO return or re-throw?
+          return reject(err)
+        }
+      })
+
+      python.stderr.on('data', data => {
+        // TODO
+        console.log(data.toString())
+      })
+
+      process.nextTick(() => {
+        python.stdin.write(input);
+        python.stdin.write('\n')
+      })
     })
-
-    if (process.env.VIRTUAL_ENV) {
-      const runtimeDir = platform() === 'win32' ? 'Scripts' : 'bin'
-      process.env.PATH = [
-        join(process.env.VIRTUAL_ENV, runtimeDir),
-        delimiter,
-        process.env.PATH,
-      ].join('')
-    }
-
-    const [pythonExecutable] = runtime.split('.')
-
-    const python = execa(
-      pythonExecutable,
-      [
-        '-u',
-        resolve(__dirname, 'invoke.py'),
-        relative(cwd(), this.#handlerPath),
-        this.#handlerName,
-      ],
-      {
-        env: this.#env,
-        input,
-        // shell: true,
-      },
-    )
-
-    let result
-
-    try {
-      result = await python
-    } catch (err) {
-      // TODO
-      console.log(err)
-
-      throw err
-    }
-
-    const { stderr, stdout } = result
-
-    if (stderr) {
-      // TODO
-      console.log(stderr)
-    }
-
-    try {
-      return this._parsePayload(stdout)
-    } catch (err) {
-      // TODO
-      console.log('No JSON')
-
-      // TODO return or re-throw?
-      return err
-    }
   }
 }
