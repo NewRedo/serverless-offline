@@ -7,15 +7,6 @@ const { parse, stringify } = JSON
 const { cwd } = process
 const { has } = Reflect
 
-const handlerProcesses = {};
-
-process.on('exit', () => {
-  Object.keys(handlerProcesses).forEach(key => {
-    const subprocess = handlerProcesses[key]
-    subprocess.kill()
-  })
-})
-
 export default class PythonRunner {
   #env = null
   #handlerName = null
@@ -29,6 +20,29 @@ export default class PythonRunner {
     this.#handlerName = handlerName
     this.#handlerPath = handlerPath
     this.#runtime = runtime
+
+    this.handlerProcess = spawn(
+      pythonExecutable,
+      [
+        '-u',
+        resolve(__dirname, 'invoke.py'),
+        relative(cwd(), this.#handlerPath),
+        this.#handlerName,
+      ],
+      {
+        env: extend(process.env, this.#env),
+        shell: true
+      },
+    )
+
+    process.on('exit', () => {
+      this.handlerProcess.kill();
+    })
+  }
+
+  removeListeners() {
+    this.handlerProcess.stdout.removeAllListeners();
+    this.handlerProcess.stderr.removeAllListeners();
   }
 
   // no-op
@@ -67,7 +81,7 @@ export default class PythonRunner {
 
   // invokeLocalPython, loosely based on:
   // https://github.com/serverless/serverless/blob/v1.50.0/lib/plugins/aws/invokeLocal/index.js#L410
-  // invoke.py, copy/pasted entirely as is:
+  // invoke.py, based on:
   // https://github.com/serverless/serverless/blob/v1.50.0/lib/plugins/aws/invokeLocal/invoke.py
   async run(event, context) {
     return new Promise((accept, reject) => {
@@ -87,29 +101,9 @@ export default class PythonRunner {
         ].join('')
       }
 
-      const fullPath = `${this.#handlerPath}.${this.#handlerName}`
+      this.handlerProcess.stdout.on('data', data => {
+        this.removeListeners()
 
-      if (!handlerProcesses[fullPath]) {
-        const [pythonExecutable] = runtime.split('.')
-
-        handlerProcesses[fullPath] = spawn(
-          pythonExecutable,
-          [
-            '-u',
-            resolve(__dirname, 'invoke.py'),
-            relative(cwd(), this.#handlerPath),
-            this.#handlerName,
-          ],
-          {
-            env: extend(process.env, this.#env),
-            shell: true
-          },
-        )
-      }
-
-      const python = handlerProcesses[fullPath];
-
-      python.stdout.on('data', data => {
         try {
           return accept(this._parsePayload(data.toString()))
         } catch (err) {
@@ -121,14 +115,14 @@ export default class PythonRunner {
         }
       })
 
-      python.stderr.on('data', data => {
+      this.handlerProcess.stderr.on('data', data => {
         // TODO
         console.log(data.toString())
       })
 
       process.nextTick(() => {
-        python.stdin.write(input);
-        python.stdin.write('\n')
+        this.handlerProcess.stdin.write(input);
+        this.handlerProcess.stdin.write('\n')
       })
     })
   }
